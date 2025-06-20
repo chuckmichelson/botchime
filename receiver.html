@@ -1,0 +1,1215 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>BotChime Receiver</title>
+  <style>
+    body {
+      background-color: #222;
+      color: white;
+      text-align: center;
+      font-family: sans-serif;
+    }
+    canvas {
+      border: 1px solid #ccc;
+      margin-top: 20px;
+    }
+    button {
+      padding: 10px 20px;
+      font-size: 16px;
+    }
+    h1 {
+      margin-bottom: 1rem;
+      color: orange;
+    }
+    #statusContainer {
+      position: relative;
+      width: 80%;
+      max-width: 600px;
+      height: 60px; /* ⬆️ doubled */
+      margin: 20px auto 5px;
+      background-color: #444;
+      border-radius: 8px;
+      overflow: hidden;
+    }
+
+    #statusBar {
+      height: 100%;
+      width: 0%;
+      background-color: limegreen;
+      transition: width 0.1s linear;
+    }
+
+    #statusText {
+      position: absolute;
+      width: 100%;
+      text-align: center;
+      top: 0;
+      line-height: 60px; /* match container height */
+      font-size: 24px;   /* ⬆️ doubled */
+      font-weight: bold;
+      color: black;
+    }
+
+    #recordIcon {
+      text-align: center;
+      font-size: 48px;
+      color: red;
+      display: none;
+      animation: pulse 1.2s infinite ease-in-out;
+    }
+
+    @keyframes pulse {
+      0%   { transform: scale(1);   opacity: 1; }
+      50%  { transform: scale(1.2); opacity: 0.6; }
+      100% { transform: scale(1);   opacity: 1; }
+    }
+
+
+  </style>
+</head>
+<body>
+  <h1>BotChime Receiver</h1>
+  <canvas id="powerCanvas" width="600" height="300"></canvas>
+  <br>
+  <canvas id="raster" width="600" height="600"></canvas>
+  <br>
+  <canvas id="combinedLabels" width="600" height="60"></canvas>
+  <br>
+  <button id="recordBtn" disabled>🎙️ Record Audio</button>
+  <button id="loadBtn" disabled>🎙️ Load Audio</button>
+  <div id="statusContainer">
+    <div id="statusBar"></div>
+    <div id="statusText">Ready</div>
+  </div>
+  <div id="recordIcon">🔴</div>
+  <p id="decodedMessage" style="font-size: 48px; color: #ff0; font-family: monospace;"></p>
+  <script>
+
+
+    // === CONFIGURATION CONSTANTS ===
+
+    // 🎚️ Spectrogram & Display
+    const SYNC_POWER_THRESHOLD_DB = 8;    // dB threshold for sync signal onset/offset
+    const CHORD_CHANGE_THRESHOLD = 10;
+    const RASTER_THRESHOLD_DB = 18;
+    const POWER_TRACE_MIN_HZ = 500;         // Min frequency for broadband power
+    const POWER_TRACE_MAX_HZ = 6000;        // Max frequency for broadband power
+    const DURATION = 8;                    // Recording duration in seconds
+    const INTERVAL_MS = 1;                 // Frame interval in milliseconds
+    const PITCH_BANDWIDTH = 10;         // Hz, vertical height of mask box
+
+    // 🎛️ FFT & Spectrogram Settings
+    const FFT_SIZE = 2048;
+    const HOP_SIZE = 1024;
+
+    // 🎨 Plotting
+    const MIN_DB = -3;
+    const MAX_DB = 25;
+    const LABEL_MARGIN = 50;  // global
+
+    // 🎶 Chord Data Defaults (loaded later)
+    let PROGRESSIONS = {};
+    let ALLOWED_CHARS = {};
+    let CHORDS = {};
+    let NOTE_FREQS = {};
+    let FREQS = [];
+    let SYMBOL_DURATION = [];
+    let binToNote = [];
+
+    const PITCHES = [
+      "C5", "C#5", "D5", "D#5", "E5", "F5", "F#5",
+      "G5", "G#5", "A5", "A#5", "B5",
+      "C6", "C#6", "D6", "D#6", "E6", "F6", "F#6",
+      "G6", "G#6", "A6", "A#6", "B6",
+      "C7", "C#7", "D7", "D#7", "E7", "F7", "F#7",
+      "G7", "G#7", "A7", "A#7", "B7",
+      "C8", "C#8", "D8", "D#8", "E8", "F8", "F#8",
+      "G8", "G#8", "A8", "A#8", "B8"
+    ];
+
+
+    // Load shared musical data
+    fetch("constants.json")
+      .then(res => res.json())
+      .then(data => {
+        PROGRESSIONS = data.PROGRESSIONS;
+        CHORDS = data.CHORDS;
+        NOTE_FREQS = data.NOTE_FREQS;
+        SYMBOL_DURATION = data.SYMBOL_DURATION;
+        ALLOWED_CHARS = data.ALLOWED_CHARS;
+
+        // Convert NOTE_FREQS { C4: 261.63, ... } to array [{ name, freq }]
+        FREQS = Object.entries(NOTE_FREQS).map(([name, freq]) => ({ name, freq }));
+
+        console.log("✅ Loaded constants.json");
+        recordBtn.disabled = false;  // enable button only after config loads
+        loadBtn.disabled = false;  // enable button only after config loads
+      })
+      .catch(err => {
+        console.error("❌ Failed to load constants.json:", err);
+        alert("Could not load BotChime constants. Recording disabled.");
+        recordBtn.disabled = true;
+        loadBtn.disabled = true;
+      });
+
+
+    // === Audio input ===
+    async function recordAudio() {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const mediaRecorder = new MediaRecorder(stream);
+      const chunks = [];
+
+      document.getElementById("decodedMessage").textContent = "";
+
+      mediaRecorder.ondataavailable = e => chunks.push(e.data);
+      mediaRecorder.onstop = async () => {
+        const blob = new Blob(chunks);
+        const arrayBuffer = await blob.arrayBuffer();
+
+        const audioCtx = new AudioContext();
+        const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
+        await processAudioBuffer(audioBuffer);
+      };
+
+      mediaRecorder.start();
+      console.log("🎙️ Recording started...");
+      startStatusBar();
+      setTimeout(() => {
+        mediaRecorder.stop();
+        stream.getTracks().forEach(track => track.stop());
+        console.log("🛑 Recording stopped.");
+      }, DURATION * 1000);
+    }
+
+
+    async function loadAudioFile() {
+      const audioCtx = new AudioContext();
+
+      try {
+        const response = await fetch('recording.wav');
+        const arrayBuffer = await response.arrayBuffer();
+        const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
+
+        await processAudioBuffer(audioBuffer);
+      } catch (err) {
+        console.error("❌ Failed to load recording.wav:", err);
+      }
+    }
+
+    function startStatusBar() {
+      document.getElementById("recordIcon").style.display = "none";
+      const bar = document.getElementById("statusBar");
+      const text = document.getElementById("statusText");
+      const totalDuration = 8000; // ms
+      const stages = [
+        { label: "Preparing", duration: 1500 },
+        { label: "Recording", duration: 5000 },
+        { label: "Finishing", duration: 1500 }
+      ];
+
+      let elapsed = 0;
+      let stageIndex = 0;
+
+      const update = () => {
+        elapsed += 100;
+        const percent = (elapsed / totalDuration) * 100;
+        bar.style.width = `${percent}%`;
+
+        // Update text based on stage
+        let sum = 0;
+        for (let i = 0; i < stages.length; i++) {
+          sum += stages[i].duration;
+          if (elapsed <= sum) {
+            if (stageIndex !== i) {
+
+              text.textContent = stages[i].label;
+
+              // 🔴 Show/hide record icon
+              const recordIcon = document.getElementById("recordIcon");
+              if (stages[i].label === "Recording") {
+                recordIcon.style.display = "block";
+              } else {
+                recordIcon.style.display = "none";
+              }
+
+              stageIndex = i;
+            }
+            break;
+          }
+        }
+
+        if (elapsed < totalDuration) {
+          setTimeout(update, 100);
+        } else {
+          bar.style.width = "0%";
+          text.textContent = "Ready";
+          document.getElementById("recordIcon").style.display = "none";
+        }
+
+      };
+
+      // Reset bar and text
+      bar.style.width = "0%";
+      text.textContent = stages[0].label;
+      elapsed = 0;
+      stageIndex = 0;
+
+      update();
+    }
+
+    // === Main pipeline ===
+    async function processAudioBuffer(audioBuffer) {
+      const raw = audioBuffer.getChannelData(0);
+      const sampleRate = audioBuffer.sampleRate;
+
+      const { Sxx_dB, freqs, times } = computeSpectrogram(raw, sampleRate);
+      const { metaTrace, dataTrace, metaDetrended, dataDetrended, signalDetrended } = computeMetaAndDataTraces(Sxx_dB, freqs);
+      const timeStep = times[1] - times[0];
+
+      const dynamicThreshold = 0.73 * Math.max(...metaDetrended);
+      const { onsetIndex, offsetIndex } = detectPowerRiseOnset(metaDetrended, timeStep);
+
+      drawPowerTraces(metaDetrended, dataDetrended, signalDetrended, timeStep, {
+        onsetIndex,
+        offsetIndex
+      });
+
+      const PHASE_SWEEP = [-0.05, -0.04, -0.03, -0.02, -0.01, 0, 0.01, 0.02, 0.03, 0.04, 0.05];
+
+      const sweepConfigs = [];
+      for (let alpha = 0.3; alpha <= 0.5; alpha += 0.025) {
+        for (let offset = -4; offset <= -2; offset += 0.25) {
+          sweepConfigs.push({
+            alpha: parseFloat(alpha.toFixed(3)),
+            offset: parseFloat(offset.toFixed(2))
+          });
+        }
+      }
+
+      let bestCandidate = null;
+      let allCandidates = [];
+
+      for (const phaseOffset of PHASE_SWEEP) {
+        const onsetIndexAdj = onsetIndex + Math.round(phaseOffset / timeStep);
+        const messageDuration = (offsetIndex - onsetIndexAdj) * timeStep;
+        const numSymbols = Math.floor(messageDuration / SYMBOL_DURATION) + 1;
+        const raster = computeRaster(Sxx_dB, freqs, times, SYMBOL_DURATION, onsetIndexAdj, numSymbols);
+        let detrendedRaster = detrendRasterOverFrequency(raster);
+        detrendedRaster = detrendRasterOverTimeUsingNoisePitches(detrendedRaster);
+        const chordChangeVector = computeChordChangeVectorFromRaster(detrendedRaster);
+        const chordPerSymbol = expandChordVector(detrendedRaster, chordChangeVector);
+
+        for (const cfg of sweepConfigs) {
+
+          // Get signal max
+          const signalMax = Math.max(...detrendedRaster.flat());
+
+          // Compute average noise level across all columns in B5 and C#8 rows
+          const noiseRows = [noteToIndex('B5'), noteToIndex('C#8')];
+          let noiseSum = 0;
+          let count = 0;
+          for (const rowIdx of noiseRows) {
+            for (let col = 0; col < detrendedRaster[rowIdx].length; col++) {
+              noiseSum += detrendedRaster[rowIdx][col];
+              count++;
+            }
+          }
+          const noiseAvg = noiseSum / count;
+
+          // Compute midpoint threshold
+          const midpointThreshold = 0.5 * (signalMax + noiseAvg);
+
+          // Compute bitmasks
+          const bitmasks = computeBitmasksFromRasterWithGlobalThreshold(
+            detrendedRaster,
+            chordPerSymbol,
+            midpointThreshold  // try values like 0.0 or -1.0 dB
+          );
+          const corrected = bitmasks.map(b => b ^ 0b00000110);
+          const reversed = corrected.map(b => typeof b === 'number' ? reverseBits8(b) : null);
+          const decoded = decodeBitmasksToMessage(reversed);
+
+          // after loading constants.json:
+          const allowedChars = ALLOWED_CHARS;
+          const allowedRegex = new RegExp(`[^${allowedChars.replace(/[-[\]/{}()*+?.\\^$|]/g, '\\$&')}]`, 'g');
+
+          let cleaned = decoded.replace(allowedRegex, '');
+
+          const candidate = {
+            cleaned,
+            decoded,
+            config: cfg,
+            phaseOffset,
+            onsetIndexAdj,
+            raster,
+            detrendedRaster,
+            chordPerSymbol,
+            numSymbols  // 👈 add this
+          };
+          candidate.score = compositeScore(candidate);
+          allCandidates.push(candidate);
+        }
+      }
+
+      bestCandidate = allCandidates.reduce((a, b) =>
+        a.score > b.score ? a : b
+      );
+
+      const decodedSymbols = bestCandidate.decoded.split('');
+      const numDecodedSymbols = decodedSymbols.length;
+
+      const onsetTimeSec = onsetIndex * timeStep;
+      const offsetTimeSec = offsetIndex * timeStep;
+      const messageDuration = offsetTimeSec - onsetTimeSec;
+      const timeBoundedMax = Math.floor(messageDuration / SYMBOL_DURATION);
+
+      // ✅ Single source of truth for number of columns
+      const numColsToDraw = bestCandidate.numSymbols;
+
+
+
+      // Draw final raster using best parameters
+      drawRaster(bestCandidate.detrendedRaster, {
+        canvasId: 'raster',
+        labelMargin: LABEL_MARGIN,
+        onsetIndex: bestCandidate.onsetIndexAdj,
+        timeStep,
+        symbolDuration: SYMBOL_DURATION,
+        offsetTime: offsetTimeSec,
+        cols: numColsToDraw
+      });
+
+      drawLabels(
+        bestCandidate.chordPerSymbol,
+        decodedSymbols,
+        bestCandidate.raster,
+        {
+          canvasId: 'combinedLabels',
+          labelMargin: LABEL_MARGIN,
+          onsetIndex,
+          timeStep,
+          symbolDuration: SYMBOL_DURATION,
+          offsetTime: offsetTimeSec,
+          cols: numColsToDraw
+        }
+      );
+
+
+
+      document.getElementById("decodedMessage").textContent = bestCandidate.cleaned;
+
+      console.log('Best Candidate Params:', bestCandidate.config);
+
+      console.log("🌟 Best phase offset:", bestCandidate.phaseOffset);
+      console.log("🧪 All candidate scores:", allCandidates.map(c => ({
+        phase: c.phaseOffset,
+        config: c.config,
+        score: c.score,
+        preview: c.cleaned.slice(0, 40)
+      })));
+    }
+
+
+    // === Raw signal to spectrogram ===
+    // Minimal radix-2 Cooley-Tukey FFT implementation (real to complex)
+    function fft(re, im) {
+      const n = re.length;
+      if ((n & (n - 1)) !== 0) throw new Error("FFT size must be a power of 2");
+
+      const levels = Math.log2(n);
+      const cosTable = new Array(n / 2);
+      const sinTable = new Array(n / 2);
+      for (let i = 0; i < n / 2; i++) {
+        const angle = (2 * Math.PI * i) / n;
+        cosTable[i] = Math.cos(angle);
+        sinTable[i] = Math.sin(angle);
+      }
+
+      // Bit-reversed addressing permutation
+      for (let i = 0, j = 0; i < n; i++) {
+        if (i < j) {
+          [re[i], re[j]] = [re[j], re[i]];
+          [im[i], im[j]] = [im[j], im[i]];
+        }
+        let bit = n >> 1;
+        while (j & bit) {
+          j ^= bit;
+          bit >>= 1;
+        }
+        j ^= bit;
+      }
+
+      // Cooley-Tukey decimation-in-time radix-2 FFT
+      for (let size = 2; size <= n; size <<= 1) {
+        const halfSize = size >> 1;
+        const tableStep = n / size;
+        for (let i = 0; i < n; i += size) {
+          for (let j = 0; j < halfSize; j++) {
+            const k = j * tableStep;
+            const tRe =  cosTable[k] * re[i + j + halfSize] + sinTable[k] * im[i + j + halfSize];
+            const tIm = -sinTable[k] * re[i + j + halfSize] + cosTable[k] * im[i + j + halfSize];
+            re[i + j + halfSize] = re[i + j] - tRe;
+            im[i + j + halfSize] = im[i + j] - tIm;
+            re[i + j] += tRe;
+            im[i + j] += tIm;
+          }
+        }
+      }
+    }
+
+
+    function computeSpectrogram(samples, sampleRate) {
+      const fftSize = 2048;
+      const hopSize = 1024;
+      const numFrames = Math.floor((samples.length - fftSize) / hopSize);
+      const numBins = fftSize / 2;
+      const window = new Float32Array(fftSize).map((_, i) =>
+        0.5 - 0.5 * Math.cos((2 * Math.PI * i) / (fftSize - 1))
+      );
+
+      const Sxx_dB = [];
+      for (let i = 0; i < numBins; i++) Sxx_dB[i] = [];
+
+      for (let f = 0; f < numFrames; f++) {
+        const offset = f * hopSize;
+        const frame = samples.slice(offset, offset + fftSize);
+        const windowed = frame.map((x, i) => x * window[i]);
+
+        const re = new Float32Array(fftSize);
+        const im = new Float32Array(fftSize);
+        for (let i = 0; i < fftSize; i++) re[i] = windowed[i] || 0;
+
+        fft(re, im);
+
+        for (let b = 0; b < numBins; b++) {
+          const mag = Math.sqrt(re[b] ** 2 + im[b] ** 2);
+          const dB = 10 * Math.log10(mag + 1e-10);
+          Sxx_dB[b][f] = dB;
+        }
+      }
+
+      const freqs = Array.from({ length: numBins }, (_, i) => i * sampleRate / fftSize);
+      const times = Array.from({ length: numFrames }, (_, i) => i * hopSize / sampleRate);
+
+      return { Sxx_dB, freqs, times };
+    }
+
+
+
+    // === Power traces ===
+    function computePowerTraceFromSpectrogram(Sxx_dB, freqs, fMin = 500, fMax = 6000) {
+      // Find bin range for desired frequency band
+      const startBin = freqs.findIndex(f => f >= fMin);
+      const endBin = freqs.findIndex(f => f >= fMax);
+
+      const numFrames = Sxx_dB[0].length;
+      const powerTrace = [];
+
+      for (let t = 0; t < numFrames; t++) {
+        let sum = 0;
+        let count = 0;
+        for (let b = startBin; b <= endBin; b++) {
+          const dB = Sxx_dB[b]?.[t];
+          if (dB !== undefined) {
+            sum += dB;
+            count++;
+          }
+        }
+        powerTrace.push(sum / (count || 1));
+      }
+
+      return powerTrace;
+    }
+
+
+    function computeMetaAndDataTraces(Sxx_dB, freqs) {
+      const metaMin = noteToFreq("C5");
+      const metaMax = noteToFreq("A#5");
+
+      const dataMin = noteToFreq("C6");
+      const dataMax = noteToFreq("C8");
+
+      const signalMin = metaMin;
+      const signalMax = dataMax;
+
+      const metaTrace = computePowerTraceFromSpectrogram(Sxx_dB, freqs, metaMin, metaMax);
+      const dataTrace = computePowerTraceFromSpectrogram(Sxx_dB, freqs, dataMin, dataMax);
+      const signalTrace = computePowerTraceFromSpectrogram(Sxx_dB, freqs, signalMin, signalMax);
+
+      const timeStep = 1 / (Sxx_dB[0]?.length / DURATION); // fallback if not explicitly passed
+
+      const metaDetrended = detrendTrace(metaTrace, timeStep);
+      const dataDetrended = detrendTrace(dataTrace, timeStep);
+      const signalDetrended = detrendTrace(signalTrace, timeStep);
+
+      return {
+        metaTrace,
+        dataTrace,
+        signalTrace,
+        metaDetrended,
+        dataDetrended,
+        signalDetrended
+      };
+    }
+
+    function detrendTrace(trace, timeStep, skipStartSec = 0.5, averageWindowSec = 0.5) {
+      const skipFrames = Math.floor(skipStartSec / timeStep);
+      const avgFrames = Math.floor(averageWindowSec / timeStep);
+      const start = skipFrames;
+      const end = skipFrames + avgFrames;
+      const mean = trace.slice(start, end).reduce((a, b) => a + b, 0) / (end - start || 1);
+      return trace.map(val => val - mean);
+    }
+
+
+    function detectPowerRiseOnset(metaDetrended, timeStep) {
+      const totalLength = metaDetrended.length;
+
+      // 1. Post-signal baseline: average of final 10% of trace
+      const postSegmentLength = Math.floor(0.1 * totalLength);
+      const postSegment = metaDetrended.slice(-postSegmentLength);
+      const baseline = postSegment.reduce((a, b) => a + b, 0) / postSegment.length;
+
+      // 2. Signal peak
+      const peak = Math.max(...metaDetrended);
+
+      // 3. Adjusted threshold
+      const threshold = baseline + 0.5 * (peak - baseline);
+
+      // 4. Onset: first rising edge from start
+      let onsetIndex = 0;
+      for (let i = 0; i < totalLength; i++) {
+        if (metaDetrended[i] > threshold) {
+          onsetIndex = i;
+          break;
+        }
+      }
+
+      // 5. Offset: last falling edge, working backward
+      let offsetIndex = totalLength - 1;
+      for (let i = totalLength - 1; i > onsetIndex; i--) {
+        if (metaDetrended[i] > threshold) {
+          offsetIndex = i;
+          break;
+        }
+      }
+
+      return { onsetIndex, offsetIndex, threshold, baseline };
+    }
+
+
+
+    // === Raster ===
+    function computeRaster(Sxx_dB, freqs, times, symbolDurationSec, onsetIndex = 0, numSymbols = null) {
+      const timeStep = times[1] - times[0];  // Should be ~ hopSize / sampleRate
+      const onsetTime = times[onsetIndex];
+
+      const windowFactor = 0.75;  // 🧪 Use 80% of symbol duration, centered
+      const totalDuration = times[times.length - 1] - onsetTime;
+      if (numSymbols === null) {
+        numSymbols = Math.floor(totalDuration / symbolDurationSec);
+      }
+
+      const raster = [];
+
+      for (let p = 0; p < PITCHES.length; p++) {
+        const centerFreq = noteToFreq(PITCHES[p]);
+        const lowFreq = centerFreq - PITCH_BANDWIDTH / 2;
+        const highFreq = centerFreq + PITCH_BANDWIDTH / 2;
+        const lowBin = freqs.findIndex(f => f >= lowFreq);
+        const highBin = freqs.findIndex(f => f >= highFreq);
+
+        const row = [];
+
+        for (let s = 0; s < numSymbols; s++) {
+          const windowDuration = symbolDurationSec * windowFactor;
+          const symbolStartTime = onsetTime + s * symbolDurationSec;
+          const symbolEndTime = symbolStartTime + windowDuration;
+
+          const startFrame = times.findIndex(t => t >= symbolStartTime);
+          const endFrame = times.findIndex(t => t >= symbolEndTime);
+
+          if (startFrame < 0 || endFrame < 0 || startFrame >= endFrame) {
+            row.push(0);  // fallback
+            continue;
+          }
+
+          let sum = 0;
+          let count = 0;
+
+          for (let b = lowBin; b <= highBin; b++) {
+            for (let t = startFrame; t < endFrame; t++) {
+              const val = Sxx_dB[b]?.[t];
+              if (val !== undefined) {
+                sum += val;
+                count++;
+              }
+            }
+          }
+
+          row.push(sum / (count || 1));
+        }
+
+        raster.push(row);
+      }
+
+      return raster;
+    }
+
+
+
+    function detrendRasterOverFrequency(raster, noisePitchNames = ["B5", "C#8"]) {
+      const pitchToIndex = Object.fromEntries(PITCHES.map((p, i) => [p, i]));
+      const noiseIndices = noisePitchNames.map(p => pitchToIndex[p]);
+      const numSymbols = raster[0].length;
+      const numPitches = raster.length;
+
+      // Step 1: Compute baseline values per symbol from noise pitch rows
+      const baselinePerSymbol = [];
+      for (let s = 0; s < numSymbols; s++) {
+        let sum = 0;
+        for (const i of noiseIndices) {
+          sum += raster[i][s];
+        }
+        baselinePerSymbol[s] = sum / noiseIndices.length;
+      }
+
+      // Step 2: Subtract baseline per symbol from every pitch at that symbol
+      const detrended = raster.map((row, pitchIndex) =>
+        row.map((val, s) => val - baselinePerSymbol[s])
+      );
+
+      return detrended;
+    }
+
+
+    function detrendRasterOverTimeUsingNoisePitches(raster, noisePitchNames = ["B5", "C#8"]) {
+      const pitchToIndex = Object.fromEntries(PITCHES.map((p, i) => [p, i]));
+      const noiseIndices = noisePitchNames.map(p => pitchToIndex[p]);
+      const numSymbols = raster[0].length;
+
+      // Step 1: Compute baseline per time column from the noise pitch rows
+      const baselinePerColumn = [];
+      for (let s = 0; s < numSymbols; s++) {
+        let sum = 0;
+        for (const i of noiseIndices) {
+          sum += raster[i][s];
+        }
+        baselinePerColumn[s] = sum / noiseIndices.length;
+      }
+
+      // Step 2: Subtract column-wise baseline from each pitch row
+      const detrended = raster.map(row =>
+        row.map((val, s) => val - baselinePerColumn[s])
+      );
+
+      return detrended;
+    }
+
+
+    // === Decoding ===
+    function computeBitmasksFromRasterWithGlobalThreshold(raster, chordPerSymbol, globalThreshold = 0.0) {
+      const numSymbols = raster[0].length;
+      const pitchToIndex = Object.fromEntries(PITCHES.map((p, i) => [p, i]));
+      const bitmasks = [];
+
+      for (let s = 0; s < numSymbols; s++) {
+        const chordName = chordPerSymbol[s];
+        const chord = CHORDS[chordName];
+        if (!chord) {
+          bitmasks.push(null);
+          continue;
+        }
+
+        const notes = chord.notes;
+        let bitmask = 0;
+
+        notes.forEach((note, i) => {
+          const rowIndex = pitchToIndex[note];
+          const signal = raster[rowIndex][s];
+          if (signal > globalThreshold) {
+            bitmask |= (1 << (7 - i));
+          }
+        });
+
+        bitmasks.push(bitmask);
+      }
+
+      return bitmasks;
+    }
+
+
+    function computeChordChangeVectorFromRaster(raster) {
+      const metaPitchRange = [
+        "C5", "C#5", "D5", "D#5", "E5", "F5",
+        "F#5", "G5", "G#5", "A5", "A#5"
+      ];
+
+      const pitchToIndex = Object.fromEntries(PITCHES.map((p, i) => [p, i]));
+      const metaIndices = metaPitchRange.map(p => pitchToIndex[p]);
+      const numSymbols = raster[0].length;
+      const vector = [];
+
+      for (let s = 0; s < numSymbols; s++) {
+        const avgMeta = metaIndices.reduce((sum, idx) => sum + raster[idx][s], 0) / metaIndices.length;
+        vector.push(avgMeta > CHORD_CHANGE_THRESHOLD ? 1 : 0);
+      }
+
+      return vector;
+    }
+
+
+    function noteToFreq(note) {
+      const noteNames = ['C', 'C#', 'D', 'D#', 'E', 'F',
+                         'F#', 'G', 'G#', 'A', 'A#', 'B'];
+      const match = note.match(/^([A-G]#?)(\d)$/);
+      const [_, name, octave] = match;
+      const midi = noteNames.indexOf(name) + (parseInt(octave) + 1) * 12;
+      return 440 * Math.pow(2, (midi - 69) / 12);
+    }
+
+
+    function noteToIndex(note) {
+      return PITCHES.indexOf(note);
+    }
+
+
+    function guessChordFromColumn(raster, colIndex) {
+      const metaPitchRange = [
+        "C5", "C#5", "D5", "D#5", "E5", "F5",
+        "F#5", "G5", "G#5", "A5", "A#5", "B5"
+      ];
+
+      const pitchToIndex = {};
+      for (let i = 0; i < PITCHES.length; i++) {
+        pitchToIndex[PITCHES[i]] = i;
+      }
+
+      const metaIndices = metaPitchRange.map(p => pitchToIndex[p]);
+
+      const activity = metaIndices.map(i => raster[i][colIndex]);
+
+      let bestScore = -Infinity;
+      let bestChord = null;
+
+      for (const [chordName, chordObj] of Object.entries(CHORDS)) {
+        const metaNotes = chordObj.meta;
+        if (!metaNotes) continue;
+
+        const target = metaPitchRange.map(p => metaNotes.includes(p) ? 1 : 0);
+        const score = activity.reduce((sum, val, i) => sum + val * target[i], 0);
+
+        if (score > bestScore) {
+          bestScore = score;
+          bestChord = chordName;
+        }
+      }
+
+      return bestChord;
+    }
+
+    function expandChordVector(raster, chordChangeVector) {
+      const chordPerSymbol = [];
+      let currentChord = "I";  // Default starting chord
+
+      for (let i = 0; i < chordChangeVector.length; i++) {
+        if (chordChangeVector[i] === 1) {
+          currentChord = guessChordFromColumn(raster, i);
+        }
+        chordPerSymbol.push(currentChord ?? "unknown");
+      }
+
+      return chordPerSymbol;
+    }
+
+    function decodeBitmasksToMessage(bitmasks) {
+      let message = "";
+      for (const b of bitmasks) {
+        if (typeof b === 'number' && b >= 0 && b <= 255) {
+          message += String.fromCharCode(b);
+        } else {
+          message += "�";  // placeholder for invalid symbols
+        }
+      }
+      return message;
+    }
+
+    function reverseBits8(n) {
+      let reversed = 0;
+      for (let i = 0; i < 8; i++) {
+        reversed <<= 1;
+        reversed |= (n >> i) & 1;
+      }
+      return reversed;
+    }
+
+
+
+    // === Candidate scoring ===
+    function scoreCharacters(str) {
+      return Array.from(str).reduce((score, c) => {
+        if (/[a-zA-Z]/.test(c)) return score + 1.0;
+        if (/[0-9]/.test(c)) return score + 0.8;
+        if (/[.,;:!?\-]/.test(c)) return score + 0.5;
+        if (/\s/.test(c)) return score + 0.2;
+        return score;
+      }, 0);
+    }
+
+    function ngramScore(str, n = 2) {
+      const freqs = {
+        th: 1.5, he: 1.4, in: 1.3, er: 1.2, an: 1.1,
+        re: 1.1, nd: 1.0, at: 1.0, on: 0.9, en: 0.9,
+        // expand if needed
+      };
+      let score = 0;
+      for (let i = 0; i < str.length - n + 1; i++) {
+        const chunk = str.slice(i, i + n).toLowerCase();
+        score += freqs[chunk] || 0;
+      }
+      return score;
+    }
+
+    function charEntropy(str) {
+      const counts = {};
+      for (const c of str) counts[c] = (counts[c] || 0) + 1;
+      const len = str.length;
+      return -Object.values(counts)
+        .map(f => f / len)
+        .reduce((sum, p) => sum + p * Math.log2(p), 0);
+    }
+
+    function compositeScore(c) {
+      return (
+        1.0 * scoreCharacters(c.cleaned) +
+        0.3 * ngramScore(c.cleaned) +
+        0.2 * charEntropy(c.cleaned)
+      );
+    }
+
+
+
+    // === Drawing ===
+    function drawPowerTraces(metaDetrended, dataDetrended, signalDetrended, timeStep, {
+      onsetIndex = null,
+      offsetIndex = null,
+      canvasId = 'powerCanvas'
+    } = {}) {
+      const canvas = document.getElementById(canvasId);
+      if (!canvas) {
+        console.warn(`❌ Canvas with id ${canvasId} not found`);
+        return;
+      }
+
+      const ctx = canvas.getContext('2d');
+      const width = canvas.width;
+      const height = canvas.height;
+      ctx.clearRect(0, 0, width, height);
+
+      const N = Math.min(metaDetrended.length, dataDetrended.length, signalDetrended.length);
+      const times = Array.from({ length: N }, (_, i) => i * timeStep);
+      const maxPower = Math.max(...metaDetrended, ...dataDetrended, ...signalDetrended);
+      const minPower = Math.min(...metaDetrended, ...dataDetrended, ...signalDetrended);
+      const powerRange = maxPower - minPower;
+
+      function scaleX(t) {
+        return (t / times[times.length - 1]) * (width - 50) + 40;
+      }
+
+      function scaleY(p) {
+        return height - 30 - ((p - minPower) / powerRange) * (height - 60);
+      }
+
+      // Draw grid and axes
+      const xTicks = 10;
+      const yTicks = 8;
+
+      ctx.strokeStyle = '#444';
+      ctx.lineWidth = 0.5;
+      ctx.font = '10px sans-serif';
+      ctx.fillStyle = '#aaa';
+      ctx.textAlign = 'right';
+      ctx.textBaseline = 'middle';
+
+      for (let i = 0; i <= yTicks; i++) {
+        const p = minPower + (i / yTicks) * powerRange;
+        const y = scaleY(p);
+        ctx.beginPath();
+        ctx.moveTo(40, y);
+        ctx.lineTo(width - 10, y);
+        ctx.stroke();
+        ctx.fillText(p.toFixed(1), 35, y);
+      }
+
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'top';
+
+      for (let i = 0; i <= xTicks; i++) {
+        const t = i * times[times.length - 1] / xTicks;
+        const x = scaleX(t);
+        ctx.beginPath();
+        ctx.moveTo(x, 10);
+        ctx.lineTo(x, height - 30);
+        ctx.stroke();
+        ctx.fillText(t.toFixed(1), x, height - 25);
+      }
+
+      // Axis lines
+      ctx.beginPath();
+      ctx.strokeStyle = '#888';
+      ctx.lineWidth = 1;
+      ctx.moveTo(40, 10);
+      ctx.lineTo(40, height - 30);
+      ctx.lineTo(width - 10, height - 30);
+      ctx.stroke();
+
+      // 🔴 Draw metaDetrended in white
+      ctx.beginPath();
+      ctx.strokeStyle = 'white';
+      ctx.moveTo(scaleX(times[0]), scaleY(metaDetrended[0]));
+      for (let i = 1; i < N; i++) {
+        ctx.lineTo(scaleX(times[i]), scaleY(metaDetrended[i]));
+      }
+      ctx.stroke();
+
+      // 🏷️ Label for metaDetrended
+      ctx.fillStyle = 'white';
+      ctx.font = '12px sans-serif';
+      ctx.fillText('metadata (C5 through A#5)', 3 * LABEL_MARGIN, 15);
+
+      // 🔵 Draw dataDetrended in yellow
+      ctx.beginPath();
+      ctx.strokeStyle = 'yellow';
+      ctx.moveTo(scaleX(times[0]), scaleY(dataDetrended[0]));
+      for (let i = 1; i < N; i++) {
+        ctx.lineTo(scaleX(times[i]), scaleY(dataDetrended[i]));
+      }
+      ctx.stroke();
+
+      // 🏷️ Label for dataDetrended
+      ctx.fillStyle = 'yellow';
+      ctx.fillText('data (C6 through C8)', 3 * LABEL_MARGIN, 30);
+
+
+      // Onset marker
+      if (onsetIndex !== null) {
+        const x = scaleX(onsetIndex * timeStep);
+        ctx.beginPath();
+        ctx.strokeStyle = 'lime';
+        ctx.moveTo(x, 10);
+        ctx.lineTo(x, height - 30);
+        ctx.stroke();
+      }
+
+      // Offset marker
+      if (offsetIndex !== null) {
+        const x = scaleX(offsetIndex * timeStep);
+        ctx.beginPath();
+        ctx.strokeStyle = 'orange';
+        ctx.moveTo(x, 10);
+        ctx.lineTo(x, height - 30);
+        ctx.stroke();
+      }
+    }
+
+    function drawRaster(raster, options) {
+      const {
+        canvasId,
+        labelMargin = 50,
+        cols,  // 👈 new
+        onsetIndex = null,
+        timeStep = null,
+        symbolDuration = null,
+        offsetTime = null,          // ⬅️ new option!
+        highlightColor = '#0f0'
+      } = options;
+
+      const canvas = document.getElementById(canvasId);
+      const ctx = canvas.getContext('2d');
+      const rows = raster.length;
+
+      const cellWidth = (canvas.width - labelMargin) / cols;
+      const cellHeight = canvas.height / rows;
+
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.fillStyle = "#111";
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+      const flat = raster.flat();
+      const minVal = Math.min(...flat);
+      const maxVal = Math.max(...flat);
+
+      for (let r = 0; r < rows; r++) {
+        const flipped = rows - 1 - r;
+        for (let c = 0; c < cols; c++) {
+          const norm = (raster[flipped][c] - minVal) / (maxVal - minVal);
+          const { r: red, g, b } = powerColor(norm);
+          ctx.fillStyle = `rgb(${red},${g},${b})`;
+          ctx.fillRect(labelMargin + c * cellWidth, r * cellHeight, cellWidth, cellHeight);
+        }
+      }
+
+      ctx.fillStyle = "#ccc";
+      ctx.font = "10px monospace";
+      ctx.textAlign = "right";
+      ctx.textBaseline = "middle";
+      for (let r = 0; r < rows; r++) {
+        const flipped = rows - 1 - r;
+        const y = r * cellHeight + cellHeight / 2;
+        ctx.fillText(PITCHES[flipped], labelMargin - 5, y);
+      }
+
+      ctx.textAlign = "center";
+      ctx.textBaseline = "top";
+      for (let c = 0; c <= cols; c += Math.ceil(cols / 10)) {
+        const x = labelMargin + c * cellWidth;
+        const t = c * symbolDuration;
+        ctx.fillText(`${t.toFixed(1)}s`, x, canvas.height - 12);
+      }
+    }
+
+
+    function powerColor(norm) {
+      norm = Math.max(0, Math.min(1, norm));  // Clamp between 0–1
+      const r = Math.round(255 * norm);
+      const g = Math.round(255 * (1 - Math.abs(norm - 0.5)));
+      const b = Math.round(255 * (1 - norm));
+      return { r, g, b };
+    }
+
+
+
+    function drawLabels(chords, symbols, raster, {
+      canvasId = 'combinedLabels',
+      labelMargin = 50,
+      fontSize = 24,
+      onsetIndex = null,
+      timeStep = null,
+      symbolDuration = null,
+      offsetTime = null,
+      cols  // 👈 ADD THIS
+    } = {}) {
+      const canvas = document.getElementById(canvasId);
+      const ctx = canvas.getContext('2d');
+      const width = canvas.width;
+      const height = canvas.height;
+      const drawWidth = width - labelMargin;
+
+      const cellWidth = drawWidth / cols;
+      const rowHeight = height / 2;
+
+      ctx.clearRect(0, 0, width, height);
+      ctx.fillStyle = "#111";
+      ctx.fillRect(0, 0, width, height);
+
+      // Grid lines
+      ctx.strokeStyle = "#444";
+      ctx.lineWidth = 1;
+      for (let i = 0; i <= cols; i++) {
+        const x = labelMargin + i * cellWidth;
+        ctx.beginPath();
+        ctx.moveTo(x, 0);
+        ctx.lineTo(x, height);
+        ctx.stroke();
+      }
+
+      // Horizontal separator
+      const separatorY = rowHeight;
+      ctx.beginPath();
+      ctx.moveTo(labelMargin, separatorY);
+      ctx.lineTo(width, separatorY);
+      ctx.stroke();
+
+      ctx.font = `bold ${fontSize}px monospace`;
+      ctx.textBaseline = "middle";
+
+      let prevChord = null;
+
+      for (let i = 0; i < cols; i++) {
+        const xCenter = labelMargin + i * cellWidth + cellWidth / 2;
+        const xLeft = labelMargin + i * cellWidth + 4; // padding from left edge
+
+        // Row 1: Chord label (left-aligned, only if changed)
+        const chord = chords[i];
+        if (chord !== prevChord) {
+          ctx.fillStyle = "#0ff";
+          ctx.textAlign = "left";
+          ctx.fillText(chord, xLeft, rowHeight / 2);
+          prevChord = chord;
+        }
+
+        // Row 2: Symbol (centered, replacing special quote with space)
+        ctx.fillStyle = "#ff0";
+        ctx.textAlign = "center";
+
+        let symbol = symbols[i];
+        if (symbol === '`' || symbol.charCodeAt(0) === 0x2018 || symbol.charCodeAt(0) === 0x2019) {
+          symbol = ' ';
+        }
+
+        ctx.fillText(symbol, xCenter, rowHeight + rowHeight / 2);
+      }
+    }
+
+
+    function resizeCanvases() {
+      const maxWidth = 1000;
+      const screenWidth = Math.min(window.innerWidth, maxWidth);
+
+      const canvases = [
+        document.getElementById('powerCanvas'),
+        document.getElementById('raster'),
+        document.getElementById('combinedLabels')
+      ];
+
+      canvases.forEach(canvas => {
+        if (canvas) {
+          canvas.style.width = screenWidth * 0.95 + 'px';
+          canvas.width = screenWidth;
+        }
+      });
+
+      // Resize buttons: each takes up 50% of 80% of screenWidth
+      const totalButtonWidth = screenWidth * 0.8;
+      const buttonWidth = totalButtonWidth / 2;
+      const buttons = [
+        document.getElementById('recordBtn'),
+        document.getElementById('loadBtn')
+      ];
+
+      buttons.forEach(button => {
+        if (button) {
+          button.style.width = buttonWidth + 'px';
+          button.style.height = '80px';         // ⬅️ Double the usual height
+          button.style.fontSize = '32px';       // ⬆️ Slightly larger text
+          button.style.margin = '5px';
+          button.style.boxSizing = 'border-box';
+        }
+      });
+
+
+    }
+
+
+    window.addEventListener('load', resizeCanvases);
+    document.getElementById("recordBtn").onclick = recordAudio;
+    document.getElementById("loadBtn").onclick = loadAudioFile;
+
+
+  </script>
+</body>
+</html>
+
+
+
+
+
+
+
+
+
+
+
+
+

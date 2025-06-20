@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>BotChime - Main Menu</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <style>
+    body {
+      background-color: #222;
+      color: #fff;
+      font-family: sans-serif;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      height: 100vh;
+      margin: 0;
+      padding: 1rem;
+      text-align: center;
+    }
+
+    h1 {
+      font-size: 1.5rem;
+      margin-bottom: 2rem;
+    }
+
+    .button-container {
+      display: flex;
+      flex-direction: row;
+      gap: 1.5rem;
+      flex-wrap: wrap;
+      justify-content: center;
+    }
+
+    button {
+      background-color: #333;
+      color: #fff;
+      border: 2px solid #888;
+      border-radius: 8px;
+      padding: 1.25rem 2.5rem;
+      font-size: 1.25rem;
+      cursor: pointer;
+      transition: background-color 0.3s, border-color 0.3s;
+      flex: 1 1 200px; /* Allows them to grow or shrink */
+      max-width: 300px;
+    }
+
+    button:hover {
+      background-color: #555;
+      border-color: #fff;
+    }
+
+    @media (max-width: 600px) {
+      .button-container {
+        flex-direction: column;
+        gap: 1rem;
+      }
+
+      button {
+        width: 100%;
+        max-width: none;
+      }
+    }
+  </style>
+</head>
+<body>
+  <h1>Use this device as...</h1>
+  <div class="button-container">
+    <button onclick="location.href='transmitter.html'">Transmitter</button>
+    <button onclick="location.href='receiver.html'">Receiver</button>
+  </div>
+</body>
+</html>
