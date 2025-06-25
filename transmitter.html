@@ -1,6 +1,9 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
+  <link rel="icon" type="image/png" href="favicon.png">
+  <link rel="apple-touch-icon" href="favicon.png">
+  <link rel="shortcut icon" href="favicon.ico">
   <meta charset="UTF-8">
   <title>BotChime Transmitter</title>
   <style>
@@ -109,7 +112,7 @@
 </head>
 <body>
   <h1>BotChime Transmitter</h1>
-  <canvas id="tonnetzCanvas" width="500" height="400"></canvas>
+  <canvas id="tonnetzCanvas" width="600" height="300"></canvas>
   <br>
   <div id="uiContainer">
     <div id="controls">
@@ -189,7 +192,7 @@
     }
 
 
-    // === Tonnetz Drawing ===
+    // === Tonnetz ===
     const canvas = document.getElementById("tonnetzCanvas");
     const ctx = canvas.getContext("2d");
 
@@ -233,10 +236,16 @@
 
       const centerX = canvas.width / 2;
       const centerY = canvas.height / 2;
-      const dx_px = 99;
-      const dy_px = 77;
-      const xOffset = 0;
-      const yOffset = -100;
+
+      // Define scale relative to your design baseline (adjust if your original was different)
+      const scale = canvas.width / 600;
+
+      const dx_px = 77 * scale;
+      const dy_px = 55 * scale;
+      const xOffset = 0 * scale;
+      const yOffset = -75 * scale;
+      const nodeRadius = 20 * scale;
+      const fontSize = 18 * scale;
 
       const nodes = generateTonnetz();
 
@@ -250,7 +259,7 @@
         }
       }
 
-      // Highlight connector lines between simultaneously active pitch classes
+      // Connections to draw between certain pitch classes
       const manualConnections = [
         ['A#', 'D#'], ['D#', 'G#'], ['G#', 'C#'], ['A#', 'D'], ['A#', 'G'],
         ['D#', 'G'], ['D#', 'C'], ['G#', 'C'], ['G#', 'F'], ['C#', 'F'],
@@ -276,41 +285,32 @@
         ctx.moveTo(px1, py1);
         ctx.lineTo(px2, py2);
 
-        if (isActive) {
-          ctx.strokeStyle = "#ffa500";
-          ctx.lineWidth = 3;
-          ctx.shadowColor = "#ffa500";
-          ctx.shadowBlur = 20;
-        } else {
-          ctx.strokeStyle = "lightgrey";
-          ctx.lineWidth = 1;
-          ctx.shadowColor = "transparent";
-          ctx.shadowBlur = 0;
-        }
-
+        ctx.strokeStyle = isActive ? "#ffa500" : "lightgrey";
+        ctx.lineWidth = isActive ? 3 * scale : 1 * scale;
+        ctx.shadowColor = isActive ? "#ffa500" : "transparent";
+        ctx.shadowBlur = isActive ? 20 * scale : 0;
         ctx.stroke();
 
-        // Always reset after each stroke to avoid accidental carryover
+        // Reset shadows after each stroke
         ctx.shadowColor = "transparent";
         ctx.shadowBlur = 0;
       }
 
-      // Draw nodes with glow for active ones
+      // Draw nodes
       for (const label in closestNode) {
         const { x, y } = closestNode[label];
         const px = centerX + x * dx_px + xOffset;
         const py = centerY + y * dy_px + yOffset;
 
         const isActive = activePitchClasses.includes(label);
-        const baseColor = "#ffa500";
 
         ctx.beginPath();
-        ctx.arc(px, py, 24, 0, 2 * Math.PI);
+        ctx.arc(px, py, nodeRadius, 0, 2 * Math.PI);
 
         if (isActive) {
-          ctx.fillStyle = baseColor;
-          ctx.shadowColor = baseColor;
-          ctx.shadowBlur = 10;
+          ctx.fillStyle = "#ffa500";
+          ctx.shadowColor = "#ffa500";
+          ctx.shadowBlur = 10 * scale;
         } else {
           ctx.fillStyle = "#333";
           ctx.shadowColor = "transparent";
@@ -318,21 +318,23 @@
         }
 
         ctx.fill();
-        ctx.shadowColor = "transparent"; // ← ensure future shapes are not glowing
+
+        // Reset shadow after each fill
+        ctx.shadowColor = "transparent";
         ctx.shadowBlur = 0;
 
-        ctx.lineWidth = 2;
+        ctx.lineWidth = 2 * scale;
         ctx.strokeStyle = "#333";
         // ctx.stroke();
 
         ctx.fillStyle = "#333";
-        ctx.font = "18px sans-serif";
+        ctx.font = `${fontSize}px sans-serif`;
         ctx.textAlign = "center";
         ctx.textBaseline = "middle";
-        // ctx.fillText(label, px, py);
+        // ctx.fillText(label, px, py); // Uncomment if you want labels
       }
-
     }
+
 
 
     // === Encoding Logic ===
@@ -453,11 +455,19 @@
       console.log("🧠 Message:", message);
       console.log("🎼 Progression:", progressionName, "→", progression);
 
-      // Flip bits 1 and 2 (zero-indexed from LSB) for transmission (for musicality)
-      const bitmasks = message.split('').map(c => {
-        const ascii = c.charCodeAt(0);
-        return ascii ^ 0b01100000;
-      });
+      // ⚠️ Null character (\x00) is used as start and stop delimiter
+      // Safe because it's unprintable and decoded as '�' in cleaned message
+      const START_SYMBOL = '\x00';
+      const STOP_SYMBOL = '\x00';
+
+      // Construct full message with start/stop delimiters
+      const fullMessage = START_SYMBOL + message + STOP_SYMBOL;
+
+      // Convert to bitmasks
+      const bitmasks = fullMessage.split('').map(asciiToBotChimeBitmask);
+
+
+
 
       // 🟣 NO HEADER — just transmit actual bitmasks
       const chordSequence = assignChords(bitmasks.length, progression);
@@ -508,41 +518,65 @@
     }
 
 
-    // === UI + Layout ===
-    function resizeCanvases() {
-      const maxWidth = 1000;
-      const screenWidth = Math.min(window.innerWidth, maxWidth);
 
-      const canvases = [
-        document.getElementById('tonnetzCanvas')
-      ];
+    // Bitmask shenanigans - to improve musicality and reduce ear fatigue
+    // Note: the goal is to reduce high frequency power
+    // We move the parity bit from the highest pitch (MSB) down two spaces
+    // We flip the truth value of two of the bits that are almost always on to almost always off
+    function asciiToBotChimeBitmask(c) {
+      const ascii = c.charCodeAt(0);
+      console.log(`🔤 Character: '${c}' (ASCII ${ascii})`);
+      console.log(`📦 Binary (original): ${ascii.toString(2).padStart(8, '0')}`);
 
-      canvases.forEach(canvas => {
-        if (canvas) {
-          canvas.style.width = screenWidth * 0.95 + 'px';
-          canvas.width = screenWidth;
-        }
-      });
+      // Step 1: Flip bits F and G (positions 5 and 6) for musicality
+      const flipMask = 0b01100000; // Bits 5 and 6
+      const flipped = ascii ^ flipMask;
+      console.log(`🔄 Step 1 - Flip bits 5 & 6: ${flipped.toString(2).padStart(8, '0')}`);
 
-      // Resize buttons: each takes up 50% of 80% of screenWidth
-      const totalButtonWidth = screenWidth * 0.8;
-      const buttonWidth = totalButtonWidth / 4;
-      const buttons = [
-        document.getElementById('playButton')
-      ];
+      // Step 2: Rearranging bits (ABCDEFGH → ABCDEHFG)
+      let out = 0;
+      out |= ((flipped >> 0) & 1) << 5;
+      out |= ((flipped >> 1) & 1) << 4;
+      out |= ((flipped >> 2) & 1) << 3;
+      out |= ((flipped >> 3) & 1) << 1;
+      out |= ((flipped >> 4) & 1) << 0;
+      out |= ((flipped >> 5) & 1) << 7;
+      out |= ((flipped >> 6) & 1) << 6;
 
-      buttons.forEach(button => {
-        if (button) {
-          button.style.width = buttonWidth + 'px';
-          button.style.height = '60px';         // ⬅️ Double the usual height
-          button.style.fontSize = '32px';       // ⬆️ Slightly larger text
-          button.style.margin = '5px';
-          button.style.boxSizing = 'border-box';
-        }
-      });
+      console.log(`🎲 Step 2 - Bit permuted (before parity): ${out.toString(2).padStart(8, '0')}`);
 
+      // Step 3: Add parity bit in position 2
+      const ones = out.toString(2).split('1').length - 1;
+      if (ones % 2 !== 0) {
+        out |= (1 << 2);
+        console.log("🧮 Step 3 - Parity bit added at position 2 (now even parity)");
+      } else {
+        console.log("🧮 Step 3 - Parity already even; no change");
+      }
 
+      console.log(`🎁 Pre-reverse bitmask: ${out.toString(2).padStart(8, '0')}`);
+
+      // Step 4: Reverse bits for musical aesthetic (e.g., lowest pitch = most likely active)
+      // const final = reverseBits8(out);
+      const final = out;
+      console.log(`🔄 Step 4 - Reversed bits: ${final.toString(2).padStart(8, '0')}`);
+
+      return final;
     }
+
+
+
+    function reverseBits8(n) {
+      let reversed = 0;
+      for (let i = 0; i < 8; i++) {
+        reversed <<= 1;
+        reversed |= (n >> i) & 1;
+      }
+      return reversed;
+    }
+
+
+    // === UI + Layout ===
 
     function populateProgressionDropdown() {
       const select = document.getElementById("progressionSelect");
@@ -566,6 +600,46 @@
       drawTonnetz();
     });
 
+
+
+    function resizeCanvases() {
+      const maxWidth = 1000;
+      const screenWidth = Math.min(window.innerWidth, maxWidth);
+
+      // Define your desired aspect ratio (e.g., 4:3 or 1:1 for square)
+      const aspectRatio = 3 / 6; // height / width
+
+      const canvases = [document.getElementById('tonnetzCanvas')];
+
+      canvases.forEach(canvas => {
+        if (canvas) {
+          const canvasWidth = screenWidth * 0.95;
+          const canvasHeight = canvasWidth * aspectRatio;
+
+          canvas.style.width = `${canvasWidth}px`;
+          canvas.style.height = `${canvasHeight}px`;
+
+          // Also set internal pixel dimensions to match
+          canvas.width = canvasWidth;
+          canvas.height = canvasHeight;
+        }
+      });
+
+      // Resize buttons: each takes up 50% of 80% of screenWidth
+      const totalButtonWidth = screenWidth * 0.6;
+      const buttonWidth = totalButtonWidth / 2;
+      const buttons = [document.getElementById('playButton')];
+
+      buttons.forEach(button => {
+        if (button) {
+          button.style.width = `${buttonWidth}px`;
+          button.style.height = '80px';
+          button.style.fontSize = '32px';
+          button.style.margin = '5px';
+          button.style.boxSizing = 'border-box';
+        }
+      });
+    }
 
 
   </script>

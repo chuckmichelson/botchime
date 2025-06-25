@@ -413,6 +413,6 @@
       "\u266dIII"
     ]
   },
-  "SYMBOL_DURATION": 0.125,
+  "SYMBOL_DURATION": 0.1,
   "ALLOWED_CHARS": "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 .,;:!?()'\"%-+="
 }

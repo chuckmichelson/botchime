@@ -1,6 +1,9 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
+  <link rel="icon" type="image/png" href="favicon.png">
+  <link rel="apple-touch-icon" href="favicon.png">
+  <link rel="shortcut icon" href="favicon.ico">
   <meta charset="UTF-8">
   <title>BotChime Receiver</title>
   <style>
@@ -70,28 +73,24 @@
 </head>
 <body>
   <h1>BotChime Receiver</h1>
-  <canvas id="powerCanvas" width="600" height="300"></canvas>
+  <canvas id="powerCanvas" width="600" height="200"></canvas>
   <br>
-  <canvas id="raster" width="600" height="600"></canvas>
+  <canvas id="raster" width="600" height="400"></canvas>
   <br>
   <canvas id="combinedLabels" width="600" height="60"></canvas>
   <br>
-  <button id="recordBtn" disabled>🎙️ Record Audio</button>
-  <button id="loadBtn" disabled>🎙️ Load Audio</button>
-  <div id="statusContainer">
-    <div id="statusBar"></div>
-    <div id="statusText">Ready</div>
-  </div>
-  <div id="recordIcon">🔴</div>
   <p id="decodedMessage" style="font-size: 48px; color: #ff0; font-family: monospace;"></p>
+  <button id="continuousBtn" disabled>🎙️ Start Recording</button>
+  <button id="stopBtn" disabled>🎙️ Stop Recording</button>
+  <div id="recordIcon">🔴</div>
   <script>
 
 
     // === CONFIGURATION CONSTANTS ===
 
     // 🎚️ Spectrogram & Display
-    const SYNC_POWER_THRESHOLD_DB = 8;    // dB threshold for sync signal onset/offset
-    const CHORD_CHANGE_THRESHOLD = 10;
+    const SYNC_POWER_THRESHOLD_DB = 10;    // dB threshold for sync signal onset/offset
+    const CHORD_CHANGE_THRESHOLD = 8;
     const RASTER_THRESHOLD_DB = 18;
     const POWER_TRACE_MIN_HZ = 500;         // Min frequency for broadband power
     const POWER_TRACE_MAX_HZ = 6000;        // Max frequency for broadband power
@@ -117,7 +116,7 @@
     let SYMBOL_DURATION = [];
     let binToNote = [];
 
-    const PITCHES = [
+    const PITCHES = ["B2", "B3", 
       "C5", "C#5", "D5", "D#5", "E5", "F5", "F#5",
       "G5", "G#5", "A5", "A#5", "B5",
       "C6", "C#6", "D6", "D#6", "E6", "F6", "F#6",
@@ -127,6 +126,21 @@
       "C8", "C#8", "D8", "D#8", "E8", "F8", "F#8",
       "G8", "G#8", "A8", "A#8", "B8"
     ];
+
+
+    let passiveAudioCtx = null;
+    let passiveStream = null;
+    let passiveProcessor = null;
+    let passiveSource = null;
+
+    let peakBeforeDrop = null;
+    let fallSampleIndex = null;
+    let onsetTimeoutSamples = null;
+    let minOffsetSampleIndex = null;
+
+
+    document.getElementById("continuousBtn").onclick = startPassiveReceiver;
+    document.getElementById("stopBtn").onclick = stopPassiveReceiver;
 
 
     // Load shared musical data
@@ -143,120 +157,286 @@
         FREQS = Object.entries(NOTE_FREQS).map(([name, freq]) => ({ name, freq }));
 
         console.log("✅ Loaded constants.json");
-        recordBtn.disabled = false;  // enable button only after config loads
-        loadBtn.disabled = false;  // enable button only after config loads
+        continuousBtn.disabled = false;  // ✅ enable passive mode
+        stopBtn.disabled = false;
       })
       .catch(err => {
         console.error("❌ Failed to load constants.json:", err);
         alert("Could not load BotChime constants. Recording disabled.");
-        recordBtn.disabled = true;
-        loadBtn.disabled = true;
+        continuousBtn.disabled = true;
       });
 
 
+
+
     // === Audio input ===
-    async function recordAudio() {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      const mediaRecorder = new MediaRecorder(stream);
-      const chunks = [];
+    // === Continuous Passive Receiver with Real-Time Snip ===
+    let passiveListening = false;
 
-      document.getElementById("decodedMessage").textContent = "";
+    let fullSampleBuffer = [];         // Stores all samples
+    let sampleRate = null;             // Set by AudioContext
 
-      mediaRecorder.ondataavailable = e => chunks.push(e.data);
-      mediaRecorder.onstop = async () => {
-        const blob = new Blob(chunks);
-        const arrayBuffer = await blob.arrayBuffer();
+    async function startPassiveReceiver() {
+      passiveListening = true;
 
-        const audioCtx = new AudioContext();
-        const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
-        await processAudioBuffer(audioBuffer);
+      // Toggle buttons
+      document.getElementById("continuousBtn").disabled = true;
+      document.getElementById("stopBtn").disabled = false;      document.getElementById("recordIcon").style.display = "none";
+
+      passiveStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      passiveAudioCtx = new AudioContext();
+      passiveSource = passiveAudioCtx.createMediaStreamSource(passiveStream);
+      passiveProcessor = passiveAudioCtx.createScriptProcessor(4096, 1, 1);
+
+
+      passiveSource.connect(passiveProcessor);
+      passiveProcessor.connect(passiveAudioCtx.destination);
+
+
+      const sampleRate = passiveAudioCtx.sampleRate;
+      const ringLength = sampleRate * 10; // 10 seconds
+      const ringPcm = new Float32Array(ringLength);
+      let ringWriteIndex = 0;
+      let absoluteSampleIndex = 0;
+
+      // Frequency band for meta signal
+      const analyser = passiveAudioCtx.createAnalyser();
+      analyser.fftSize = 2048;
+      passiveSource.connect(analyser);
+      const binMin = Math.floor(noteToFreq("C5") / (sampleRate / analyser.fftSize));
+      const binMax = Math.ceil(noteToFreq("A#5") / (sampleRate / analyser.fftSize));
+      const dataArray = new Float32Array(analyser.frequencyBinCount);
+
+      // State
+      const ringBuffer = [];
+      const ringSize = Math.floor(sampleRate * 20 / 2048); // ~0.5s worth
+      let triggered = false;
+      let onsetSampleIndex = null;
+      let offsetSampleIndex = null;
+      let minOffsetSampleIndex = null;
+      let fallSampleIndex = null;
+      let peakBeforeDrop = null;
+      let lastTriggerTime = -Infinity;
+      const triggerCooldown = 2000; // in milliseconds
+      let triggerWallClockTime = null; // in ms
+      const timeoutDurationMs = 8000;  // 8 seconds
+      let forcedByTimeout = false;
+
+
+      passiveProcessor.onaudioprocess = (e) => {
+        const input = e.inputBuffer.getChannelData(0);
+        for (let i = 0; i < input.length; i++) {
+          ringPcm[ringWriteIndex] = input[i];
+          ringWriteIndex = (ringWriteIndex + 1) % ringPcm.length;
+        }
+        absoluteSampleIndex += input.length;
+
+        // Spectral power
+        analyser.getFloatFrequencyData(dataArray);
+        let sum = 0;
+        let validBins = 0;
+        for (let i = binMin; i <= binMax; i++) {
+          const val = dataArray[i];
+          if (Number.isFinite(val)) {
+            sum += val;
+            validBins++;
+          }
+        }
+        const avg = validBins > 0 ? sum / validBins : -Infinity;
+        ringBuffer.push(avg);
+        if (ringBuffer.length > ringSize) ringBuffer.shift();
+
+        const finiteRing = ringBuffer.filter(Number.isFinite);
+        const baseline = finiteRing.length > 0 ? finiteRing.reduce((a, b) => a + b, 0) / finiteRing.length : -Infinity;
+        const dynamicSpikeThreshold = 12; // dB above rolling baseline
+        // const offsetThreshold = 10;
+
+        // Onset
+        const now = performance.now();
+
+        if (
+          !triggered &&
+          (avg - baseline) > dynamicSpikeThreshold &&
+          Number.isFinite(avg) && Number.isFinite(baseline) &&
+          (now - lastTriggerTime > triggerCooldown)
+        ) {
+          triggered = true;
+          triggerWallClockTime = performance.now();
+          onsetSampleIndex = absoluteSampleIndex;
+          minOffsetSampleIndex = onsetSampleIndex + Math.floor(sampleRate * 1.0);
+          peakSinceOnset = avg;
+          lastTriggerTime = now;
+          document.getElementById("recordIcon").style.display = "block";
+          console.log("🔴 Onset at sample:", onsetSampleIndex);
+        }
+
+
+        // Offset logic
+        if (
+          triggered &&
+          triggerWallClockTime &&
+          now - triggerWallClockTime > timeoutDurationMs &&
+          !offsetSampleIndex // prevent looping
+        ) {
+          offsetSampleIndex = absoluteSampleIndex;
+          forcedByTimeout = true;
+          console.warn("⏰ Timeout reached — forcing offset at:", offsetSampleIndex);
+        }
+
+
+        if (triggered && absoluteSampleIndex > minOffsetSampleIndex) {
+
+          // Continuously update peak
+          if (avg > peakSinceOnset) peakSinceOnset = avg;
+
+          // Check for fall below threshold relative to peak
+          const dropThreshold = 12; // dB
+          if (!fallSampleIndex && avg < (peakSinceOnset - dropThreshold)) {
+            fallSampleIndex = absoluteSampleIndex;
+            peakBeforeDrop = peakSinceOnset;
+            console.log("🔻 Fall detected at:", fallSampleIndex, "| peakBeforeDrop:", peakBeforeDrop.toFixed(1));
+          }
+
+          // Confirm offset after 1s of quiet
+          if (fallSampleIndex && absoluteSampleIndex > fallSampleIndex + sampleRate * 1.0) {
+            const reboundThreshold = peakBeforeDrop + 12; // rebound if signal climbs back up
+            const hasRebounded = ringBuffer.some(v => v > reboundThreshold);
+
+            if (!hasRebounded) {
+              offsetSampleIndex = absoluteSampleIndex;
+              console.log("🟢 Offset confirmed at:", offsetSampleIndex);
+            } else {
+              console.log("↩️ Rebound detected. Cancelling offset.");
+              fallSampleIndex = null;
+              peakBeforeDrop = null;
+              peakSinceOnset = avg; // reset peak
+            }
+          }
+
+
+          if (offsetSampleIndex) {
+            const prerollDuration = 1.0; // seconds
+            const prerollSamples = Math.floor(sampleRate * prerollDuration);
+            const start = Math.max(0, onsetSampleIndex - prerollSamples);
+            const end = offsetSampleIndex;
+            const sliceLength = end - start;
+            const sliced = new Float32Array(sliceLength);
+
+            for (let i = 0; i < sliceLength; i++) {
+              const ringIndex = (start + i) % ringPcm.length;
+              sliced[i] = ringPcm[ringIndex];
+            }
+
+
+            const segmentBuffer = passiveAudioCtx.createBuffer(1, sliceLength, sampleRate);
+            segmentBuffer.copyToChannel(sliced, 0);
+
+            console.log(`📦 Sending to decoder. Reason: ${forcedByTimeout ? "Timeout" : "Natural offset"}`);
+            processAudioBuffer(segmentBuffer);
+
+
+            // Reset
+            triggered = false;
+            onsetSampleIndex = null;
+            offsetSampleIndex = null;
+            fallSampleIndex = null;
+            peakBeforeDrop = null;
+            triggerWallClockTime = null;
+            forcedByTimeout = false;
+            document.getElementById("recordIcon").style.display = "none";
+
+          }
+        }
       };
 
-      mediaRecorder.start();
-      console.log("🎙️ Recording started...");
-      startStatusBar();
-      setTimeout(() => {
-        mediaRecorder.stop();
-        stream.getTracks().forEach(track => track.stop());
-        console.log("🛑 Recording stopped.");
-      }, DURATION * 1000);
+      console.log("🎙️ Passive receiver started with real-time ring buffer");
     }
 
 
-    async function loadAudioFile() {
-      const audioCtx = new AudioContext();
 
-      try {
-        const response = await fetch('recording.wav');
-        const arrayBuffer = await response.arrayBuffer();
-        const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
 
-        await processAudioBuffer(audioBuffer);
-      } catch (err) {
-        console.error("❌ Failed to load recording.wav:", err);
+    function stopPassiveReceiver(segmentBuffer) {
+      passiveListening = false;
+
+      // Toggle buttons
+      document.getElementById("continuousBtn").disabled = false;
+      document.getElementById("stopBtn").disabled = true;
+      // processAudioBuffer();
+      stopBtn.disabled = true;
+      continuousBtn.disabled = false;
+      document.getElementById("recordIcon").style.display = "none";
+
+      if (passiveProcessor) {
+        passiveProcessor.disconnect();
+        passiveProcessor.onaudioprocess = null;
+        passiveProcessor = null;
+      }
+
+      if (passiveSource) {
+        passiveSource.disconnect();
+        passiveSource = null;
+      }
+
+      if (passiveAudioCtx && passiveAudioCtx.state !== 'closed') {
+        passiveAudioCtx.close();
+        passiveAudioCtx = null;
+      }
+
+      if (passiveStream) {
+        passiveStream.getTracks().forEach(track => track.stop());
+        passiveStream = null;
+      }
+
+      console.log("🛑 Passive receiver stopped and cleaned up.");
+    }
+
+
+
+
+    // === Trigger ===
+    function updateTriggerLogic(metaPower, sampleRate) {
+      metaPowerHistory.push(metaPower);
+      if (metaPowerHistory.length > maxHistory) metaPowerHistory.shift();
+
+      const avgRecent = metaPowerHistory.slice(0, -2).reduce((a, b) => a + b, 0) / (metaPowerHistory.length - 2 || 1);
+      const boostThreshold = 6; // dB above local average
+      const decayThreshold = 2; // dB below recent average
+
+      if (!isTriggered && metaPower > avgRecent + boostThreshold) {
+        isTriggered = true;
+        onsetSampleIndex = fullSampleBuffer.length;
+        console.log("🔴 Transient detected at", onsetSampleIndex, "| Δ =", (metaPower - avgRecent).toFixed(1));
+      }
+
+      if (isTriggered && metaPower < avgRecent - decayThreshold) {
+        const offsetSampleIndex = fullSampleBuffer.length;
+        const pre = Math.floor(sampleRate * 1.0);
+        const post = Math.floor(sampleRate * 1.0);
+        const start = Math.max(0, onsetSampleIndex - pre);
+        const end = offsetSampleIndex + post;
+        const sliced = Float32Array.from(fullSampleBuffer.slice(start, end));
+
+        const audioBuffer = audioCtx.createBuffer(1, sliced.length, sampleRate);
+        audioBuffer.copyToChannel(sliced, 0);
+
+        processAudioBuffer(audioBuffer);
+
+        isTriggered = false;
+        onsetSampleIndex = null;
+        metaPowerHistory.length = 0; // Clear history for next detection
+
+        // Optionally trim old samples
+        const maxSamples = 10 * sampleRate;
+        if (fullSampleBuffer.length > maxSamples) {
+          const cutoff = fullSampleBuffer.length - maxSamples;
+          fullSampleBuffer = fullSampleBuffer.slice(cutoff);
+        }
+
+        console.log("🟢 Offset at", offsetSampleIndex, "| Sent", (sliced.length / sampleRate).toFixed(2), "sec");
       }
     }
 
-    function startStatusBar() {
-      document.getElementById("recordIcon").style.display = "none";
-      const bar = document.getElementById("statusBar");
-      const text = document.getElementById("statusText");
-      const totalDuration = 8000; // ms
-      const stages = [
-        { label: "Preparing", duration: 1500 },
-        { label: "Recording", duration: 5000 },
-        { label: "Finishing", duration: 1500 }
-      ];
 
-      let elapsed = 0;
-      let stageIndex = 0;
-
-      const update = () => {
-        elapsed += 100;
-        const percent = (elapsed / totalDuration) * 100;
-        bar.style.width = `${percent}%`;
-
-        // Update text based on stage
-        let sum = 0;
-        for (let i = 0; i < stages.length; i++) {
-          sum += stages[i].duration;
-          if (elapsed <= sum) {
-            if (stageIndex !== i) {
-
-              text.textContent = stages[i].label;
-
-              // 🔴 Show/hide record icon
-              const recordIcon = document.getElementById("recordIcon");
-              if (stages[i].label === "Recording") {
-                recordIcon.style.display = "block";
-              } else {
-                recordIcon.style.display = "none";
-              }
-
-              stageIndex = i;
-            }
-            break;
-          }
-        }
-
-        if (elapsed < totalDuration) {
-          setTimeout(update, 100);
-        } else {
-          bar.style.width = "0%";
-          text.textContent = "Ready";
-          document.getElementById("recordIcon").style.display = "none";
-        }
-
-      };
-
-      // Reset bar and text
-      bar.style.width = "0%";
-      text.textContent = stages[0].label;
-      elapsed = 0;
-      stageIndex = 0;
-
-      update();
-    }
 
     // === Main pipeline ===
     async function processAudioBuffer(audioBuffer) {
@@ -275,7 +455,7 @@
         offsetIndex
       });
 
-      const PHASE_SWEEP = [-0.05, -0.04, -0.03, -0.02, -0.01, 0, 0.01, 0.02, 0.03, 0.04, 0.05];
+      const PHASE_SWEEP = [-0.04, -0.03, -0.02, -0.01, 0, 0.01, 0.02, 0.03, 0.04, 0.05];
 
       const sweepConfigs = [];
       for (let alpha = 0.3; alpha <= 0.5; alpha += 0.025) {
@@ -326,15 +506,24 @@
             chordPerSymbol,
             midpointThreshold  // try values like 0.0 or -1.0 dB
           );
-          const corrected = bitmasks.map(b => b ^ 0b00000110);
-          const reversed = corrected.map(b => typeof b === 'number' ? reverseBits8(b) : null);
-          const decoded = decodeBitmasksToMessage(reversed);
 
-          // after loading constants.json:
-          const allowedChars = ALLOWED_CHARS;
-          const allowedRegex = new RegExp(`[^${allowedChars.replace(/[-[\]/{}()*+?.\\^$|]/g, '\\$&')}]`, 'g');
+          const mapped = [];
+          const parityErrors = [];
 
-          let cleaned = decoded.replace(allowedRegex, '');
+          for (const b of bitmasks) {
+            const { char, parityError } = botChimeBitmaskToAscii(b);
+            mapped.push(char ?? '�'); // Replace null with a placeholder
+            parityErrors.push(parityError);
+          }
+
+          const decoded = decodeBitmasksToMessage(mapped);
+
+          // Allow all standard printable ASCII (codes 32–126)
+          const standardAsciiRegex = /[ -~]/g;  // Matches any printable ASCII character
+          const filtered = (decoded.match(standardAsciiRegex) || []).join('');
+
+          // Clean
+          const cleaned = filtered.replace(/`/g, '');
 
           const candidate = {
             cleaned,
@@ -345,7 +534,8 @@
             raster,
             detrendedRaster,
             chordPerSymbol,
-            numSymbols  // 👈 add this
+            numSymbols,
+            parityErrors  // 👈 NEW
           };
           candidate.score = compositeScore(candidate);
           allCandidates.push(candidate);
@@ -357,6 +547,21 @@
       );
 
       const decodedSymbols = bestCandidate.decoded.split('');
+      const headerChar = decodedSymbols[0];
+      const footerChar = decodedSymbols[decodedSymbols.length - 1];
+
+      const headerLength = headerChar?.charCodeAt(0);
+      const footerLength = footerChar?.charCodeAt(0);
+      const statedLength = headerLength === footerLength ? headerLength : null;
+
+      console.log("🪪 Header char:", headerChar, "→", headerLength);
+      console.log("🔚 Footer char:", footerChar, "→", footerLength);
+      console.log("📏 Stated message length (excluding header/footer):", statedLength);
+
+      const actualLength = decodedSymbols.length - 2;
+      console.log("📦 Actual message body length:", actualLength);
+      console.log("✅ Lengths match?", statedLength === actualLength);
+
       const numDecodedSymbols = decodedSymbols.length;
 
       const onsetTimeSec = onsetIndex * timeStep;
@@ -497,7 +702,48 @@
 
 
 
-    // === Power traces ===
+    // === Power monitoring ===
+
+    const metaPowerHistory = [];  // dB values
+    const maxHistory = 20;        // Number of frames (~0.5 sec if each update is ~25 ms)
+    let isTriggered = false;
+    let onsetSampleIndex = null;
+
+    function computeCurrentMetaPower(samples, sampleRate) {
+      const N = 2048;
+      const input = samples.slice(-N);  // use last N samples
+      const windowed = new Float32Array(N);
+      for (let i = 0; i < N; i++) {
+        const w = 0.5 - 0.5 * Math.cos((2 * Math.PI * i) / (N - 1)); // Hann window
+        windowed[i] = input[i] * w;
+      }
+
+      const re = new Float32Array(N);
+      const im = new Float32Array(N);
+      for (let i = 0; i < N; i++) re[i] = windowed[i];
+
+      fft(re, im);  // you already have this in your code
+
+      const binHz = sampleRate / N;
+      const fMin = noteToFreq("C5");
+      const fMax = noteToFreq("A#5");
+      const binMin = Math.floor(fMin / binHz);
+      const binMax = Math.ceil(fMax / binHz);
+
+      let sum = 0;
+      let count = 0;
+
+      for (let b = binMin; b <= binMax; b++) {
+        const mag = Math.sqrt(re[b] ** 2 + im[b] ** 2);
+        const dB = 10 * Math.log10(mag + 1e-10);
+        sum += dB;
+        count++;
+      }
+
+      return sum / count;
+    }
+
+
     function computePowerTraceFromSpectrogram(Sxx_dB, freqs, fMin = 500, fMax = 6000) {
       // Find bin range for desired frequency band
       const startBin = freqs.findIndex(f => f >= fMin);
@@ -565,30 +811,35 @@
 
     function detectPowerRiseOnset(metaDetrended, timeStep) {
       const totalLength = metaDetrended.length;
+      const skipFrames = Math.floor(0.5 / timeStep);  // number of frames = 0.5s
 
-      // 1. Post-signal baseline: average of final 10% of trace
-      const postSegmentLength = Math.floor(0.1 * totalLength);
-      const postSegment = metaDetrended.slice(-postSegmentLength);
+      const startIdx = skipFrames;
+      const endIdx = totalLength - skipFrames;
+
+      // 1. Post-signal baseline: average of final 10% of usable region
+      const postSegmentLength = Math.floor(0.1 * (endIdx - startIdx));
+      const postSegment = metaDetrended.slice(endIdx - postSegmentLength, endIdx);
       const baseline = postSegment.reduce((a, b) => a + b, 0) / postSegment.length;
 
-      // 2. Signal peak
-      const peak = Math.max(...metaDetrended);
+      // 2. Signal peak (in usable range)
+      const usableSegment = metaDetrended.slice(startIdx, endIdx);
+      const peak = Math.max(...usableSegment);
 
       // 3. Adjusted threshold
-      const threshold = baseline + 0.5 * (peak - baseline);
+      const threshold = baseline + 0.50 * (peak - baseline);
 
-      // 4. Onset: first rising edge from start
-      let onsetIndex = 0;
-      for (let i = 0; i < totalLength; i++) {
+      // 4. Onset: first index where signal rises above threshold
+      let onsetIndex = startIdx;
+      for (let i = startIdx; i < endIdx; i++) {
         if (metaDetrended[i] > threshold) {
           onsetIndex = i;
           break;
         }
       }
 
-      // 5. Offset: last falling edge, working backward
-      let offsetIndex = totalLength - 1;
-      for (let i = totalLength - 1; i > onsetIndex; i--) {
+      // 5. Offset: last index where signal is above threshold
+      let offsetIndex = endIdx - 1;
+      for (let i = endIdx - 1; i > onsetIndex; i--) {
         if (metaDetrended[i] > threshold) {
           offsetIndex = i;
           break;
@@ -597,6 +848,7 @@
 
       return { onsetIndex, offsetIndex, threshold, baseline };
     }
+
 
 
 
@@ -659,7 +911,7 @@
 
 
 
-    function detrendRasterOverFrequency(raster, noisePitchNames = ["B5", "C#8"]) {
+    function detrendRasterOverFrequency(raster, noisePitchNames = ["B2", "B3", "B8"]) {
       const pitchToIndex = Object.fromEntries(PITCHES.map((p, i) => [p, i]));
       const noiseIndices = noisePitchNames.map(p => pitchToIndex[p]);
       const numSymbols = raster[0].length;
@@ -823,17 +1075,46 @@
       return chordPerSymbol;
     }
 
-    function decodeBitmasksToMessage(bitmasks) {
-      let message = "";
-      for (const b of bitmasks) {
-        if (typeof b === 'number' && b >= 0 && b <= 255) {
-          message += String.fromCharCode(b);
-        } else {
-          message += "�";  // placeholder for invalid symbols
-        }
-      }
-      return message;
+
+    function decodeBitmasksToMessage(chars) {
+      return chars.map(c => typeof c === 'string' ? c : "�").join('');
     }
+
+
+
+    function botChimeBitmaskToAscii(b) {
+      if (typeof b !== 'number') return { char: null, parityError: true };
+
+      // Step 1: Check parity
+      const ones = b.toString(2).split('1').length - 1;
+      const parityError = ones % 2 !== 0;
+      // if (parityError) {
+      //   console.log("⚠️ Parity check failed:", b.toString(2).padStart(8, '0'));
+      // }
+
+      // Step 2: Reverse bits back
+      const unreversed = reverseBits8(b);
+
+      // Step 3: Undo permutation (ABCDEHFG → ABCDEFGH)
+      let temp = 0;
+      temp |= ((unreversed >> 5) & 1) << 0; // H → 0
+      temp |= ((unreversed >> 4) & 1) << 1; // G → 1
+      temp |= ((unreversed >> 3) & 1) << 2; // F → 2
+      temp |= ((unreversed >> 1) & 1) << 3; // E → 3
+      temp |= ((unreversed >> 0) & 1) << 4; // D → 4
+      temp |= ((unreversed >> 7) & 1) << 5; // C → 5
+      temp |= ((unreversed >> 6) & 1) << 6; // B → 6
+      // Bit 2 is parity, ignore
+
+      // Step 4: Flip bits F and G back
+      const flipped = temp ^ 0b01100000;
+
+      const char = String.fromCharCode(flipped);
+      return { char, parityError };
+    }
+
+
+
 
     function reverseBits8(n) {
       let reversed = 0;
@@ -880,17 +1161,30 @@
         .reduce((sum, p) => sum + p * Math.log2(p), 0);
     }
 
+    function parityPenaltyScore(errors) {
+      const total = errors.length;
+      const bad = errors.filter(Boolean).length;
+      const penalty = bad / total;
+      return -3.0 * penalty; // You can tune this factor
+    }
+
     function compositeScore(c) {
+      const lengthBonus = (c.statedLength === c.decoded.length - 2) ? 1.0 : -2.0;
       return (
         1.0 * scoreCharacters(c.cleaned) +
         0.3 * ngramScore(c.cleaned) +
-        0.2 * charEntropy(c.cleaned)
+        0.2 * charEntropy(c.cleaned) +
+        1.0 * parityPenaltyScore(c.parityErrors) +
+        lengthBonus
       );
     }
 
 
 
+
+
     // === Drawing ===
+
     function drawPowerTraces(metaDetrended, dataDetrended, signalDetrended, timeStep, {
       onsetIndex = null,
       offsetIndex = null,
@@ -1144,9 +1438,20 @@
         ctx.textAlign = "center";
 
         let symbol = symbols[i];
-        if (symbol === '`' || symbol.charCodeAt(0) === 0x2018 || symbol.charCodeAt(0) === 0x2019) {
-          symbol = ' ';
+
+        // Replace first and last symbol with its ASCII code for clarity
+        if (i === 0 || i === symbols.length - 1) {
+          symbol = symbol.charCodeAt(0).toString();
+          ctx.font = `bold ${fontSize * 0.75}px monospace`;  // shrink to fit 2-digit numbers
+        } else {
+          // Optional: clean up visually confusing quotes
+          const code = symbol.charCodeAt(0);
+          if (code < 32 || code === 127 || symbol === '`' || code === 0x2018 || code === 0x2019) {
+            symbol = ' ';
+          }
         }
+
+
 
         ctx.fillText(symbol, xCenter, rowHeight + rowHeight / 2);
       }
@@ -1174,8 +1479,8 @@
       const totalButtonWidth = screenWidth * 0.8;
       const buttonWidth = totalButtonWidth / 2;
       const buttons = [
-        document.getElementById('recordBtn'),
-        document.getElementById('loadBtn')
+        document.getElementById('continuousBtn'),
+        document.getElementById('stopBtn')
       ];
 
       buttons.forEach(button => {
@@ -1193,8 +1498,6 @@
 
 
     window.addEventListener('load', resizeCanvases);
-    document.getElementById("recordBtn").onclick = recordAudio;
-    document.getElementById("loadBtn").onclick = loadAudioFile;
 
 
   </script>

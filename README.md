@@ -21,9 +21,8 @@ This project explores the boundary between communication protocols, music, and p
 
 ### How to Use
 
-- Open the transmitter on one device, type a message, and choose a chord progression.
-- Open the receiver on another device, press Record Audio, and it will listen and decode for 8 seconds.
-- On the transmitter, Press Play.
+- Open the receiver on one device, press Start Recording, and it will listen passively.
+- Open the transmitter on another device, type a message, choose a chord progression, and press Play.
 - Aim the receiver's mic toward the sound source.
 
 ---
@@ -44,7 +43,6 @@ This project explores the boundary between communication protocols, music, and p
 | `transmitter.html` | Sends musical messages |
 | `receiver.html` | Listens and decodes messages |
 | `constants.json` | Defines notes, chords, and progressions, etc. |
-| `recording.wav` | Test audio for loading |
 | `README.md` | You’re here! |
 
 ---
