@@ -21,8 +21,8 @@ This project explores the boundary between communication protocols, music, and p
 
 ### How to Use
 
-- Open the receiver on one device, press Start Recording, and it will listen passively.
-- Open the transmitter on another device, type a message, choose a chord progression, and press Play.
+- Open the receiver on your phone and press Start Recording.
+- Open the transmitter on a tablet or computer, type a message, choose a chord progression, and press Play.
 - Aim the receiver's mic toward the sound source.
 
 ---
@@ -74,7 +74,7 @@ BotChime draws inspiration from projects like **Gibberlink**, which also explore
 
 Works best in quiet environments.
 Requires reasonably modern devices (especially for accurate microphone input).
-Transmission speed is balanced with musical aesthetics - roughly 8 characters per second.
+Transmission speed is balanced with musical aesthetics - roughly 10 characters per second.
 
 ---
 

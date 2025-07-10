@@ -29,7 +29,7 @@
       position: relative;
       width: 80%;
       max-width: 600px;
-      height: 60px; /* ⬆️ doubled */
+      height: 60px;
       margin: 20px auto 5px;
       background-color: #444;
       border-radius: 8px;
@@ -48,8 +48,8 @@
       width: 100%;
       text-align: center;
       top: 0;
-      line-height: 60px; /* match container height */
-      font-size: 24px;   /* ⬆️ doubled */
+      line-height: 60px;
+      font-size: 24px;
       font-weight: bold;
       color: black;
     }
@@ -72,16 +72,18 @@
   </style>
 </head>
 <body>
-  <h1>BotChime Receiver</h1>
+  <h1 style="font-size: 68px;">BotChime Receiver</h1>
   <canvas id="powerCanvas" width="600" height="200"></canvas>
   <br>
   <canvas id="raster" width="600" height="400"></canvas>
   <br>
   <canvas id="combinedLabels" width="600" height="60"></canvas>
   <br>
-  <p id="decodedMessage" style="font-size: 48px; color: #ff0; font-family: monospace;"></p>
-  <button id="continuousBtn" disabled>🎙️ Start Recording</button>
-  <button id="stopBtn" disabled>🎙️ Stop Recording</button>
+  <p id="decodedMessage" style="font-size: 96px; color: #ff0; font-family: monospace;"></p>
+  <div id="buttonContainer">
+    <button id="startBtn" disabled>🎙️ Start Recording</button>
+    <button id="stopBtn" disabled>🎙️ Stop Recording</button>
+  </div>
   <div id="recordIcon">🔴</div>
   <script>
 
@@ -139,9 +141,8 @@
     let minOffsetSampleIndex = null;
 
 
-    document.getElementById("continuousBtn").onclick = startPassiveReceiver;
+    document.getElementById("startBtn").onclick = startPassiveReceiver;
     document.getElementById("stopBtn").onclick = stopPassiveReceiver;
-
 
     // Load shared musical data
     fetch("constants.json")
@@ -156,16 +157,12 @@
         // Convert NOTE_FREQS { C4: 261.63, ... } to array [{ name, freq }]
         FREQS = Object.entries(NOTE_FREQS).map(([name, freq]) => ({ name, freq }));
 
-        console.log("✅ Loaded constants.json");
-        continuousBtn.disabled = false;  // ✅ enable passive mode
+        startBtn.disabled = false;  // ✅ enable passive mode
         stopBtn.disabled = false;
       })
       .catch(err => {
-        console.error("❌ Failed to load constants.json:", err);
-        alert("Could not load BotChime constants. Recording disabled.");
-        continuousBtn.disabled = true;
+        startBtn.disabled = true;
       });
-
 
 
 
@@ -180,8 +177,9 @@
       passiveListening = true;
 
       // Toggle buttons
-      document.getElementById("continuousBtn").disabled = true;
-      document.getElementById("stopBtn").disabled = false;      document.getElementById("recordIcon").style.display = "none";
+      document.getElementById("startBtn").disabled = true;
+      document.getElementById("stopBtn").disabled = false;
+      document.getElementById("recordIcon").style.display = "none";
 
       passiveStream = await navigator.mediaDevices.getUserMedia({ audio: true });
       passiveAudioCtx = new AudioContext();
@@ -217,9 +215,9 @@
       let fallSampleIndex = null;
       let peakBeforeDrop = null;
       let lastTriggerTime = -Infinity;
-      const triggerCooldown = 2000; // in milliseconds
+      const triggerCooldown = 10; // in milliseconds
       let triggerWallClockTime = null; // in ms
-      const timeoutDurationMs = 8000;  // 8 seconds
+      const timeoutDurationMs = 3200;  // 8 seconds
       let forcedByTimeout = false;
 
 
@@ -267,7 +265,6 @@
           peakSinceOnset = avg;
           lastTriggerTime = now;
           document.getElementById("recordIcon").style.display = "block";
-          console.log("🔴 Onset at sample:", onsetSampleIndex);
         }
 
 
@@ -280,7 +277,6 @@
         ) {
           offsetSampleIndex = absoluteSampleIndex;
           forcedByTimeout = true;
-          console.warn("⏰ Timeout reached — forcing offset at:", offsetSampleIndex);
         }
 
 
@@ -294,7 +290,6 @@
           if (!fallSampleIndex && avg < (peakSinceOnset - dropThreshold)) {
             fallSampleIndex = absoluteSampleIndex;
             peakBeforeDrop = peakSinceOnset;
-            console.log("🔻 Fall detected at:", fallSampleIndex, "| peakBeforeDrop:", peakBeforeDrop.toFixed(1));
           }
 
           // Confirm offset after 1s of quiet
@@ -304,9 +299,7 @@
 
             if (!hasRebounded) {
               offsetSampleIndex = absoluteSampleIndex;
-              console.log("🟢 Offset confirmed at:", offsetSampleIndex);
             } else {
-              console.log("↩️ Rebound detected. Cancelling offset.");
               fallSampleIndex = null;
               peakBeforeDrop = null;
               peakSinceOnset = avg; // reset peak
@@ -315,7 +308,7 @@
 
 
           if (offsetSampleIndex) {
-            const prerollDuration = 1.0; // seconds
+            const prerollDuration = 2.0; // seconds
             const prerollSamples = Math.floor(sampleRate * prerollDuration);
             const start = Math.max(0, onsetSampleIndex - prerollSamples);
             const end = offsetSampleIndex;
@@ -331,7 +324,6 @@
             const segmentBuffer = passiveAudioCtx.createBuffer(1, sliceLength, sampleRate);
             segmentBuffer.copyToChannel(sliced, 0);
 
-            console.log(`📦 Sending to decoder. Reason: ${forcedByTimeout ? "Timeout" : "Natural offset"}`);
             processAudioBuffer(segmentBuffer);
 
 
@@ -349,7 +341,6 @@
         }
       };
 
-      console.log("🎙️ Passive receiver started with real-time ring buffer");
     }
 
 
@@ -359,11 +350,11 @@
       passiveListening = false;
 
       // Toggle buttons
-      document.getElementById("continuousBtn").disabled = false;
+      document.getElementById("startBtn").disabled = false;
       document.getElementById("stopBtn").disabled = true;
       // processAudioBuffer();
       stopBtn.disabled = true;
-      continuousBtn.disabled = false;
+      startBtn.disabled = false;
       document.getElementById("recordIcon").style.display = "none";
 
       if (passiveProcessor) {
@@ -387,7 +378,6 @@
         passiveStream = null;
       }
 
-      console.log("🛑 Passive receiver stopped and cleaned up.");
     }
 
 
@@ -405,7 +395,6 @@
       if (!isTriggered && metaPower > avgRecent + boostThreshold) {
         isTriggered = true;
         onsetSampleIndex = fullSampleBuffer.length;
-        console.log("🔴 Transient detected at", onsetSampleIndex, "| Δ =", (metaPower - avgRecent).toFixed(1));
       }
 
       if (isTriggered && metaPower < avgRecent - decayThreshold) {
@@ -432,7 +421,6 @@
           fullSampleBuffer = fullSampleBuffer.slice(cutoff);
         }
 
-        console.log("🟢 Offset at", offsetSampleIndex, "| Sent", (sliced.length / sampleRate).toFixed(2), "sec");
       }
     }
 
@@ -458,14 +446,20 @@
       const PHASE_SWEEP = [-0.04, -0.03, -0.02, -0.01, 0, 0.01, 0.02, 0.03, 0.04, 0.05];
 
       const sweepConfigs = [];
+      const thresholdFactors = [0.3, 0.4, 0.5, 0.6, 0.7];  // ← Add more if needed
+
       for (let alpha = 0.3; alpha <= 0.5; alpha += 0.025) {
         for (let offset = -4; offset <= -2; offset += 0.25) {
-          sweepConfigs.push({
-            alpha: parseFloat(alpha.toFixed(3)),
-            offset: parseFloat(offset.toFixed(2))
-          });
+          for (const thresholdFactor of thresholdFactors) {
+            sweepConfigs.push({
+              alpha: parseFloat(alpha.toFixed(3)),
+              offset: parseFloat(offset.toFixed(2)),
+              thresholdFactor: thresholdFactor
+            });
+          }
         }
       }
+
 
       let bestCandidate = null;
       let allCandidates = [];
@@ -498,7 +492,7 @@
           const noiseAvg = noiseSum / count;
 
           // Compute midpoint threshold
-          const midpointThreshold = 0.5 * (signalMax + noiseAvg);
+          const midpointThreshold = cfg.thresholdFactor * (signalMax + noiseAvg);
 
           // Compute bitmasks
           const bitmasks = computeBitmasksFromRasterWithGlobalThreshold(
@@ -535,8 +529,9 @@
             detrendedRaster,
             chordPerSymbol,
             numSymbols,
-            parityErrors  // 👈 NEW
+            parityErrors
           };
+
           candidate.score = compositeScore(candidate);
           allCandidates.push(candidate);
         }
@@ -553,14 +548,6 @@
       const headerLength = headerChar?.charCodeAt(0);
       const footerLength = footerChar?.charCodeAt(0);
       const statedLength = headerLength === footerLength ? headerLength : null;
-
-      console.log("🪪 Header char:", headerChar, "→", headerLength);
-      console.log("🔚 Footer char:", footerChar, "→", footerLength);
-      console.log("📏 Stated message length (excluding header/footer):", statedLength);
-
-      const actualLength = decodedSymbols.length - 2;
-      console.log("📦 Actual message body length:", actualLength);
-      console.log("✅ Lengths match?", statedLength === actualLength);
 
       const numDecodedSymbols = decodedSymbols.length;
 
@@ -604,15 +591,9 @@
 
       document.getElementById("decodedMessage").textContent = bestCandidate.cleaned;
 
-      console.log('Best Candidate Params:', bestCandidate.config);
 
-      console.log("🌟 Best phase offset:", bestCandidate.phaseOffset);
-      console.log("🧪 All candidate scores:", allCandidates.map(c => ({
-        phase: c.phaseOffset,
-        config: c.config,
-        score: c.score,
-        preview: c.cleaned.slice(0, 40)
-      })));
+      const msg = bestCandidate.cleaned;
+
     }
 
 
@@ -1088,9 +1069,6 @@
       // Step 1: Check parity
       const ones = b.toString(2).split('1').length - 1;
       const parityError = ones % 2 !== 0;
-      // if (parityError) {
-      //   console.log("⚠️ Parity check failed:", b.toString(2).padStart(8, '0'));
-      // }
 
       // Step 2: Reverse bits back
       const unreversed = reverseBits8(b);
@@ -1142,7 +1120,16 @@
       const freqs = {
         th: 1.5, he: 1.4, in: 1.3, er: 1.2, an: 1.1,
         re: 1.1, nd: 1.0, at: 1.0, on: 0.9, en: 0.9,
-        // expand if needed
+        ti: 0.9, es: 0.9, or: 0.8, te: 0.8, of: 0.8,
+        ed: 0.8, is: 0.8, it: 0.8, al: 0.7, ar: 0.7,
+        st: 0.7, to: 0.7, nt: 0.7, ng: 0.6, se: 0.6,
+        ha: 0.6, as: 0.6, ou: 0.6, io: 0.6, le: 0.6,
+        ve: 0.6, co: 0.5, me: 0.5, de: 0.5, ro: 0.5,
+        li: 0.5, ll: 0.5, be: 0.5, ne: 0.5, ma: 0.4,
+        ca: 0.4, us: 0.4, el: 0.4, di: 0.4, ri: 0.4,
+        ch: 0.4, ea: 0.4, ic: 0.4, ra: 0.4, no: 0.3,
+        ce: 0.3, la: 0.3, ut: 0.3, ta: 0.3, pe: 0.3,
+        fo: 0.3, wa: 0.3, ai: 0.3, il: 0.3, ee: 0.3
       };
       let score = 0;
       for (let i = 0; i < str.length - n + 1; i++) {
@@ -1192,7 +1179,6 @@
     } = {}) {
       const canvas = document.getElementById(canvasId);
       if (!canvas) {
-        console.warn(`❌ Canvas with id ${canvasId} not found`);
         return;
       }
 
@@ -1437,12 +1423,13 @@
         ctx.fillStyle = "#ff0";
         ctx.textAlign = "center";
 
+
         let symbol = symbols[i];
 
-        // Replace first and last symbol with its ASCII code for clarity
+        // Replace first and last symbol with a dot instead of ASCII code
         if (i === 0 || i === symbols.length - 1) {
-          symbol = symbol.charCodeAt(0).toString();
-          ctx.font = `bold ${fontSize * 0.75}px monospace`;  // shrink to fit 2-digit numbers
+          symbol = '•';  // or '.' if you prefer
+          ctx.font = `${fontSize}px monospace`;  // keep consistent font size
         } else {
           // Optional: clean up visually confusing quotes
           const code = symbol.charCodeAt(0);
@@ -1450,6 +1437,7 @@
             symbol = ' ';
           }
         }
+
 
 
 
@@ -1479,7 +1467,7 @@
       const totalButtonWidth = screenWidth * 0.8;
       const buttonWidth = totalButtonWidth / 2;
       const buttons = [
-        document.getElementById('continuousBtn'),
+        document.getElementById('startBtn'),
         document.getElementById('stopBtn')
       ];
 
@@ -1498,6 +1486,7 @@
 
 
     window.addEventListener('load', resizeCanvases);
+
 
 
   </script>

@@ -249,6 +249,7 @@
       "I",
       "V",
       "vi",
+      "vi",
       "IV"
     ],
     "doo_wop": [
@@ -274,20 +275,28 @@
       "vi"
     ],
     "chromatic_walk": [
+      "ii",
+      "I",
       "I",
       "I#dim",
+      "I#dim",
+      "ii",
       "ii",
       "V"
     ],
     "request_clarification": [
       "i",
+      "i",
       "\u266dVI",
+      "\u266dVII",
       "\u266dVII",
       "v"
     ],
     "circle_of_fifths": [
       "vi",
       "ii",
+      "ii",
+      "V",
       "V",
       "I"
     ],
@@ -303,31 +312,45 @@
     ],
     "mirror_step": [
       "I",
+      "I",
+      "ii",
       "ii",
       "iii",
+      "iii",
+      "ii",
       "ii",
       "I"
     ],
     "hint_hint": [
+      "V",
+      "I",
+      "I",
+      "I",
       "I",
       "I#dim",
+      "I#dim",
+      "ii",
+      "ii",
       "ii",
       "V"
     ],
     "tentative_assertion": [
       "ii",
       "ii",
+      "ii",
+      "V",
       "V",
       "I"
     ],
     "lighter_journey": [
+      "ii",
       "I",
       "vi",
       "ii",
       "V",
       "I",
       "IV",
-      "V",
+      "ii",
       "I"
     ],
     "pachelbel": [
@@ -341,6 +364,7 @@
       "V"
     ],
     "mario_theme": [
+      "iii",
       "I",
       "V",
       "vi",
@@ -350,15 +374,23 @@
       "I"
     ],
     "yep": [
+      "V",
       "I",
+      "I",
+      "IV",
       "IV"
     ],
     "hopeful_rise": [
       "I",
       "ii",
+      "ii",
+      "ii",
+      "IV",
       "IV",
       "V",
-      "vi"
+      "vi",
+      "vi",
+      "V"
     ],
     "chromatic_puzzle": [
       "I",
@@ -370,9 +402,17 @@
       "vi"
     ],
     "climb_then_tumble": [
+      "V",
+      "ii",
+      "ii",
       "ii",
       "iii",
+      "iii",
       "IV",
+      "IV",
+      "V",
+      "V",
+      "V",
       "V",
       "ii",
       "I"
@@ -386,7 +426,14 @@
       "I"
     ],
     "offer_more_info": [
+      "V",
+      "ii",
+      "ii",
       "I",
+      "I",
+      "I",
+      "V",
+      "V",
       "V",
       "I"
     ],
@@ -398,7 +445,7 @@
       "V",
       "I"
     ],
-    "all_chords": [
+    "does_not_compute": [
       "I",
       "ii",
       "iii",
